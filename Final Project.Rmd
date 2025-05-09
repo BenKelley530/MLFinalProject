@@ -1,0 +1,297 @@
+---
+title: "Final Project"
+author: "Ben Kelley"
+date: "2025-04-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# The Problem
+
+https://coloradosun.com/2023/11/19/colorado-river-lake-mead-lake-powell-dry/
+
+https://www.naco.org/news/lower-basin-states-strike-agreement-preserve-water-supply-colorado-river-basin
+
+In 2023, the federal government intervened in a dispute between Nevada, Arizona, and California over usage of the Colorado River. The Colorado is a crucial source of water for all three states and over the past twenty years, the river's water flow has decreased dramatically. Consequently, federal and state reservoirs in all three states are running dangerously low. In the early 2020s, the situation became dire enough to require a dramatic remedy in the form of reduced usage of water from the river. The three states, whose adjoining regions all depend on the river, were unable to reach an agreement on the distribution of burdens resulting from a reduction in water usage. Ultimately, federal intervention forced an agreement which preserved the water reservoirs.
+
+Many studies today demonstrate that climate change is likely to make water scarcity a more common phenomenon in the future. That means that situations like what we saw in 2023 are likely to appear again. However, it may be possible to avoid such drastic measures if we anticipate the water shortage and work earlier to prevent it.
+
+This project is aimed at informing legislators at state levels or regulators at state or federal levels about where potential water shortages may occur. I will take data on rainfall in every county in the continental United States from the National Oceanic and Atmospheric Association (NOAA) and try to assess whether there are any regions experiencing trends similar to this region at the intersection of Nevada, Arizona, and California to identify "red flags" in existing climate data. This will help regulators to make smart decisions now in order to avoid future burdens.
+
+# Data Loading
+
+Precipitation: https://www.ncei.noaa.gov/pub/data/cirs/climdiv/climdiv-norm-pcpncy-v1.0.0-20250404
+
+CLIMDIV: https://www.ncei.noaa.gov/pub/data/cirs/climdiv/county-to-climdivs.txt
+
+Region names: https://www.ncei.noaa.gov/access/monitoring/reference-maps/conus-climate-divisions
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+
+# Reading Function
+
+weather_read <- function(new_url, data_name){
+
+url <- new_url
+temp_file <- tempfile()
+download.file(url, temp_file, mode = "wb")
+
+widths <- c(11, rep(7, 12))
+
+raw_data <- read_fwf(
+  temp_file,
+  fwf_widths(widths),
+  col_types = cols(.default = "c")
+)
+
+colnames(raw_data) <- c("ID", month.abb)
+
+processed_data <- raw_data %>%
+  mutate(
+    county_code     = substr(ID, 1, 5),
+    data_type = substr(ID, 6, 7),
+    year      = substr(ID, 8, 11)
+  ) %>%
+  select(-ID) %>%
+  mutate(across(all_of(month.abb), ~ as.numeric(.x)))
+
+long_data <- processed_data %>%
+  pivot_longer(cols = all_of(month.abb), names_to = "month", values_to = data_name)
+
+return(long_data)
+
+}
+
+# Precipitation
+
+precip <- weather_read(new_url = "https://www.ncei.noaa.gov/pub/data/cirs/climdiv/climdiv-pcpncy-v1.0.0-20250506", data_name = "precip_in")
+
+climate <- precip
+
+climate <- climate[, -2]
+
+# Climate Divisions
+url <- "https://www.ncei.noaa.gov/pub/data/cirs/climdiv/county-to-climdivs.txt"
+
+# Read file, header included
+county_to_climdiv <- read_table(url, skip = 2)
+
+county_to_climdiv <- county_to_climdiv[complete.cases(county_to_climdiv), ]
+
+county_to_climdiv <- county_to_climdiv[, c(2, 3)]
+
+colnames(county_to_climdiv)[1] <- "county_code"
+
+climate <- climate |> left_join(county_to_climdiv, by = "county_code")
+
+colnames(climate)[5] <- "climdiv"
+
+climate <- climate %>%
+  group_by(climdiv, year, month) %>%
+  summarize(mean_precip = mean(precip_in, na.rm = TRUE), .groups = "drop")
+
+month_order <- month.abb
+
+# Sort data by year and month
+climate <- climate %>%
+  mutate(month = factor(month, levels = month_order)) %>%  # Ensure month order is correct
+  arrange(climdiv, year, month)  # Sort by division, year, and month
+
+regions <- read.csv("~/Machine Learning/CPP Regions.csv")
+
+climate$climdiv <- as.integer(climate$climdiv)
+
+colnames(regions)[1] <- "climdiv"
+
+climate <- climate |> left_join(regions, by = "climdiv")
+
+climate <- climate |> mutate(Region = paste(State, Name, sep = ", "))
+
+```
+
+# Data Exploration
+
+```{r}
+library(zoo)
+
+climate <- climate %>%
+  mutate(
+    year_month = as.yearmon(paste(year, month), format = "%Y %b")
+  )
+
+climate <- climate[!climate$year == 2025, ]
+
+div101 <- climate |> filter(climdiv == 101)
+
+plot(div101$year_month, div101$mean_precip,
+     xlab = "Year", ylab = "Avg Precipitation (in)", main = "Precipitation in North Valley, Alabama", type = "l")
+
+div101_recent <- climate |> filter(climdiv == 101, year >= 2000, year <= 2010)
+
+plot(div101_recent$year_month, div101_recent$mean_precip,
+     xlab = "Year", ylab = "Avg Precipitation (in)", main = "Precipitation in North Valley, Alabama", type = "l")
+
+div407_recent <- climate |> filter(climdiv == 407, year >= 2000)
+
+plot(div407_recent$year_month, div407_recent$mean_precip, xlab = "Year", ylab = "Avg Precipitation (in)", main = "Southeastern Desert Basins, CA", type = "l")
+```
+
+These graphs show the nature of the data. The structure of the data is a very long time series with about 130 * 12 entries for every climate region, as defined by the NOAA. The amount of noise and data will require me to limit the analysis to the most recent 25 years. That timeframe is ideal regardless since the issues in the Southern portion of the Colorado River began in earnest around 2005 and using data from a century beforehand would likely obscure the recent trends that are of concern here.
+
+# Modeling
+
+I am here interested in analyzing trends in the data and seeing which regions are experiencing similar changes in precipitation, rather than seeing which regions are climatically similar by precipitation. Therefore, I will scale the data across regions in order to make trends the point of analysis. Then, I will pursue hierarchical clustering. Hierarchical clustering is a form of unsupervised learning that allows the computer to make mathematical judgments about what number of clusters is appropriate, since I do not have intuition about this.
+
+```{r}
+
+precip <- climate[, c(1, 4:8)]
+
+dfmod <- precip %>%
+  pivot_wider(
+    names_from = year_month,
+    values_from = mean_precip
+  )
+
+dfmod <- dfmod[-338, ]
+
+library(dplyr)
+library(tidyr)
+
+df_long <- dfmod %>%
+  pivot_longer(
+    cols = -c(Region, climdiv, Name, State),
+    names_to = "year_month",
+    values_to = "precip"
+  ) %>%
+  mutate(
+    year = sub(".* ", "", year_month)
+  ) %>%
+  group_by(Region, year) %>%
+  summarise(
+    annual_precip = sum(precip, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+df_yearly <- df_long %>%
+  pivot_wider(
+    names_from = year,
+    values_from = annual_precip
+  )
+
+df_yearly <- df_yearly[, c(1, 107:131)]
+
+library(tidyverse)
+
+mat <- df_yearly %>%
+  column_to_rownames("Region") %>%
+  as.matrix()
+
+mat_scaled <- scale(mat, center = TRUE, scale = TRUE)
+
+library(pvclust)
+
+set.seed(1001)
+
+fit <- pvclust(t(mat_scaled), method.hclust = "ward.D2", method.dist = "euclidean")
+
+clusters <- pvpick(fit, alpha = 0.95, pv = "au", type = "geq")$clusters
+
+clusters
+
+cluster_assignments <- tibble(
+  Region = unlist(clusters),
+  Cluster = rep(seq_along(clusters), times = sapply(clusters, length))
+)
+
+df_clustered <- df_long %>%
+  left_join(cluster_assignments, by = "Region") %>%
+  mutate(
+    precip = as.numeric(annual_precip),      # <- fix here
+    year = as.numeric(year)           # if plotting by year
+  )
+
+df_clustered <- df_clustered |> 
+  filter(year >= 2000)
+
+# Plot average trend per cluster
+df_clustered %>%
+  group_by(Cluster, year) %>%
+  summarise(mean_precip = mean(precip, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = as.numeric(year), y = mean_precip, color = as.factor(Cluster))) +
+  geom_line() +
+  labs(x = "Year", y = "Mean Annual Precipitation", color = "Cluster") +
+  theme_minimal()
+
+df_clustered %>%
+  group_by(Cluster) %>%
+  summarise(overall_mean = mean(precip, na.rm = TRUE)) %>%
+  arrange(desc(overall_mean))
+
+df_clustered %>%
+  filter(Cluster == 35) %>%
+  group_by(Cluster, year) %>%
+  summarise(mean_precip = mean(precip, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = as.numeric(year), y = mean_precip)) +
+  geom_line(color = "blue") +
+  labs(x = "Year", y = "Mean Annual Precipitation", title = "High Precipitation Cluster (Cluster 35)") +
+  theme_minimal()
+
+clusters
+```
+
+The model produced many clusters. There are a number of them with only one or two regions. It is difficult to identify any particularly notable differences here, with the exception of cluster 35, which I have isolated in the second plot, which contains three regions in the Pacific Northwest - a particularly rainy part of the country. In order to understand these results better, I will isolate a few clusters of interest. I will choose clusters with many regions, which presumably show general trends instead of outliers, and clusters that contain one of the areas in the drought that prompted the question for this project.
+
+```{r}
+int_clus <- c(39, 38, 37, 36, 35, 34, 33, 30, 29, 27, 24)
+#AZ, NW is in cluster 24
+
+df_clustered %>%
+  filter(Cluster %in% int_clus) |> 
+  group_by(Cluster, year) %>%
+  summarise(mean_precip = mean(precip, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = as.numeric(year), y = mean_precip, color = as.factor(Cluster))) +
+  geom_line() +
+  labs(x = "Year", y = "Mean Annual Precipitation", color = "Cluster", title = "Clusters of Interest") +
+  theme_minimal()
+
+df_clustered %>%
+  filter(Cluster == 24) |> 
+  group_by(Cluster, year) %>%
+  summarise(mean_precip = mean(precip, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = as.numeric(year), y = mean_precip)) +
+  geom_line() +
+  labs(x = "Year", y = "Mean Annual Precipitation", title = "Cluster 24") +
+  theme_minimal()
+```
+The graph of the clusters of interest shows us a couple of helpful things. It contains the largest clusters and two clusters with atypical rainfall, which are also the two clusters we chose because of other information (the second graph helps to make positive identification of the especially low rainfall cluster in the clusters of interest as cluster 24, the cluster containing the drought region). The large clusters with more general trends all appear somewhat similar. Certain of those clusters are higher and lower, but they all stay within a reasonable range and display a lot of similar peaks and dips. The Pacific Northwest cluster (35) is far above the rest. The drought cluster (24, containing Northwest Arizona) is far below the others. Returning to the graph with all of the clusters, it is clear that cluster 24 is still noticeably lower than any other cluster, even with all of our small clusters on the plot. It does not, however, appear to be an outlier in that graph.
+
+# Conclusion
+
+```{r}
+clusters[[24]]
+
+region_mean <- df_clustered %>%
+  filter(Region == "California, Southeast Desert Basin") %>%
+  summarise(mean_precip = mean(precip, na.rm = TRUE)) %>%
+  pull(mean_precip)
+
+df_clustered %>%
+  filter(Region == "California, Southeast Desert Basin") |> 
+  ggplot(aes(x = as.numeric(year), y = precip)) +
+  geom_line() +
+  geom_hline(yintercept = region_mean, col = "red") + 
+  labs(x = "Year", y = "Mean Annual Precipitation", title = "CA, Southeast Desert Basin") +
+  theme_minimal()
+```
+
+This analysis demonstrates that there are some regions to be concerned about because of changes in their precipitation. Northwest Arizona, one of the drought sites for the prompting question is in a cluster with, on average, considerably lower precipitation than anywhere else - and that level is declining. Examining that cluster reveals, unsurprisingly, that it is comprised of nearby regions in Arizona, New Mexico, and Utah. These are all hot, dry areas, in general. However, measures to conserve water have not, to my knowledge, needed to be taken in New Mexico or Utah yet. Regulators in these areas should more closely examine their data and prepare to take measures to conserve water.
+
+However, there is also reason to think that the analysis demonstrates that we do not need to be overly concerned about the trends in this cluster and other clusters that dip to similar levels. Both of the drought regions of interest in California and Nevada were not assigned a cluster at all - marking them as outlier patterns. An examination of the trend for Southeast Desert Basins in California, a region afflicted by the drought that prompted the initial question of this project, reveals that it receives far less precipitation than the cluster containing the Arizona region. The average value of the CA region is lower than the minimum value of the AZ cluster. This gives us reason to think that the necessity of federal intervention in water negotiations was truly an outlier situation - one that we do not have cause to think will happen again in the near future.
